@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+.DS_Store
+bin/
+home-podcast
+home-podcast.exe
+token
+audio/*

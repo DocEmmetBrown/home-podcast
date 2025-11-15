@@ -1,0 +1,7 @@
+# Example feed metadata configuration for the home-podcast service.
+# Copy this file and adjust values before pointing PODCAST_FEED_CONFIG at it.
+
+title: "Home Podcast"
+description: "Private podcast feed generated from the local audio library."
+language: "fr"
+author: "Home Podcast Team"
