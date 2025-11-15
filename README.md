@@ -4,7 +4,7 @@ This service is a Go binary that scans a directory of audio files and serves pod
 
 ## Features
 
-- **Go 1.21+ compiled binary** suitable for Linux/amd64 deployment.
+- **Go 1.25+ compiled binary** suitable for Linux/amd64 deployment.
 - **Directory watching** backed by `fsnotify`, with debounce handling to fold bursts of file events into single rescan operations.
 - **Tag extraction** via `github.com/dhowden/tag` (title/artist/album) and MP3 duration estimation using `github.com/tcolgate/mp3`.
 - **Local-only listener** (defaults to `127.0.0.1:8080`) for use behind a reverse proxy.
@@ -42,7 +42,7 @@ To manage feed metadata in one place, set `PODCAST_FEED_CONFIG` to a YAML file c
 
 Supported audio extensions are: `.mp3`, `.m4a`, `.aac`, `.wav`, `.flac`, `.ogg`.
 
-1. Install Go 1.21 or newer.
+1. Install Go 1.25 or newer.
 2. Fetch dependencies and build the binary (or run `make build-local`):
 
    ```bash
@@ -78,7 +78,8 @@ The provided `Makefile` streamlines common workflows:
 - `make build-local` — builds a binary for the current platform.
 - `make test` — runs the full test suite with coverage collection.
 - `make coverage` — shows the coverage summary after `make test`.
-- `make deploy` — stages the binary, systemd unit, and environment template to the remote host, then promotes them with `sudo` on the destination (requires `DEPLOY_HOST` and that the remote user can run `sudo` for the relevant paths).
+- `make deploy` — uploads only the rebuilt binary and restarts the remote `home-podcast` systemd service.
+- `make first-deploy` — performs the full initial remote setup (binary, systemd unit, env file, optional token file) and enables the service; re-run this when provisioning a new host.
 
 Example deploy invocation:
 
