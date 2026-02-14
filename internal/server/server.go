@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"mime"
 	"net/http"
@@ -43,10 +44,11 @@ type serverHandler struct {
 	audioRoot string
 	feed      FeedMetadata
 	logger    *log.Logger
+	allowed   map[string]struct{}
 }
 
 // New creates the HTTP handler that exposes the library API and RSS feed.
-func New(lib EpisodeProvider, validator TokenValidator, audioRoot string, feed FeedMetadata, logger *log.Logger) http.Handler {
+func New(lib EpisodeProvider, validator TokenValidator, audioRoot string, allowedExtensions []string, feed FeedMetadata, logger *log.Logger) http.Handler {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -72,6 +74,10 @@ func New(lib EpisodeProvider, validator TokenValidator, audioRoot string, feed F
 		audioRoot: absRoot,
 		feed:      feed,
 		logger:    logger,
+		allowed:   make(map[string]struct{}, len(allowedExtensions)),
+	}
+	for _, ext := range allowedExtensions {
+		h.allowed[strings.ToLower(ext)] = struct{}{}
 	}
 
 	mux := http.NewServeMux()
@@ -80,6 +86,8 @@ func New(lib EpisodeProvider, validator TokenValidator, audioRoot string, feed F
 	mux.HandleFunc("/feed", h.handleFeed)
 	mux.HandleFunc("/feed.xml", h.handleFeed)
 	mux.HandleFunc("/rss", h.handleFeed)
+	mux.HandleFunc("/ui", h.handleUI)
+	mux.HandleFunc("/ui/upload", h.handleUpload)
 	mux.HandleFunc("/audio/", h.handleAudio)
 
 	return logRequests(mux, logger)
@@ -142,14 +150,101 @@ func (h *serverHandler) handleFeed(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *serverHandler) handleAudio(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+func (h *serverHandler) handleUI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	token, ok := h.requireToken(w, r)
+	if !ok {
+		return
+	}
+
+	setAuthCookie(w, r, token)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	if _, err := w.Write([]byte(uiPage)); err != nil {
+		h.logger.Printf("failed to write UI page: %v", err)
+	}
+}
+
+func (h *serverHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
 	if _, ok := h.requireToken(w, r); !ok {
 		return
+	}
+
+	if err := r.ParseMultipartForm(200 << 20); err != nil {
+		h.logger.Printf("upload parse error: %v", err)
+		http.Error(w, "invalid upload form", http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		h.httpError(w, "missing file", http.StatusBadRequest, err)
+		return
+	}
+	defer file.Close()
+
+	name := filepath.Base(header.Filename)
+	if name == "" {
+		http.Error(w, "invalid filename", http.StatusBadRequest)
+		return
+	}
+
+	ext := strings.ToLower(filepath.Ext(name))
+	if _, ok := h.allowed[ext]; !ok {
+		http.Error(w, "unsupported file type", http.StatusBadRequest)
+		return
+	}
+
+	dest := filepath.Join(h.audioRoot, name)
+	if _, err := os.Stat(dest); err == nil {
+		http.Error(w, "file already exists", http.StatusConflict)
+		return
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		h.httpError(w, "stat error", http.StatusInternalServerError, err)
+		return
+	}
+
+	out, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
+	if err != nil {
+		h.httpError(w, "unable to create file", http.StatusInternalServerError, err)
+		return
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, file); err != nil {
+		_ = os.Remove(dest)
+		h.httpError(w, "write error", http.StatusInternalServerError, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (h *serverHandler) handleAudio(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodDelete {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	if r.Method == http.MethodDelete {
+		if _, ok := h.requireToken(w, r); !ok {
+			return
+		}
+	} else {
+		if _, ok := h.requireToken(w, r); !ok {
+			return
+		}
 	}
 
 	rel := strings.TrimPrefix(r.URL.Path, "/audio/")
@@ -186,6 +281,20 @@ func (h *serverHandler) handleAudio(w http.ResponseWriter, r *http.Request) {
 
 	if info.IsDir() {
 		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	if r.Method == http.MethodDelete {
+		if err := os.Remove(resolved); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			h.logger.Printf("failed to delete audio file %s: %v", resolved, err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
@@ -378,7 +487,51 @@ func extractToken(r *http.Request) string {
 		return strings.TrimSpace(authz[7:])
 	}
 
+	if cookie, err := r.Cookie(authCookieName); err == nil {
+		if value := strings.TrimSpace(cookie.Value); value != "" {
+			return value
+		}
+	}
+
 	return ""
+}
+
+func (h *serverHandler) httpError(w http.ResponseWriter, userMsg string, status int, err error) {
+	if err != nil {
+		h.logger.Printf("%s: %v", userMsg, err)
+	}
+	http.Error(w, userMsg, status)
+}
+
+const authCookieName = "podcast_token"
+
+func setAuthCookie(w http.ResponseWriter, r *http.Request, token string) {
+	if token == "" {
+		return
+	}
+	cookie := &http.Cookie{
+		Name:     authCookieName,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   isHTTPSRequest(r),
+	}
+	http.SetCookie(w, cookie)
+}
+
+func isHTTPSRequest(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+	if forwarded == "" {
+		return false
+	}
+	parts := strings.Split(forwarded, ",")
+	if len(parts) == 0 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(parts[0]), "https")
 }
 
 func pathWithinRoot(root, target string) bool {
@@ -480,3 +633,203 @@ type rssEnclosure struct {
 	Length int64  `xml:"length,attr"`
 	Type   string `xml:"type,attr"`
 }
+
+const uiPage = `<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width,initial-scale=1">
+	<title>Home Podcast Library</title>
+	<style>
+		body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; background: #f5f6f8; color: #1a1c1f; }
+		h1 { margin-bottom: 1.5rem; }
+		section { background: #fff; border-radius: 8px; padding: 1.5rem; box-shadow: 0 2px 4px rgba(0,0,0,0.08); margin-bottom: 2rem; }
+		button, input[type="submit"] { cursor: pointer; background: #1a73e8; color: #fff; border: none; border-radius: 4px; padding: 0.6rem 1.1rem; font-size: 0.95rem; }
+		button.secondary { background: #5f6368; }
+		button:disabled { background: #9aa0a6; cursor: not-allowed; }
+		table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+		th, td { padding: 0.6rem; border-bottom: 1px solid #e0e0e0; text-align: left; }
+		th { background: #f0f2f5; text-transform: uppercase; font-size: 0.75rem; letter-spacing: .05em; }
+		.actions { display: flex; gap: 0.5rem; }
+		#status { margin-top: 0.75rem; font-size: 0.9rem; }
+		.success { color: #0b8043; }
+		.error { color: #d93025; }
+	</style>
+</head>
+<body>
+	<h1>Home Podcast Library</h1>
+
+	<section>
+		<h2>Upload New Episode</h2>
+		<form id="uploadForm">
+			<input type="file" id="fileInput" name="file" accept="audio/*" required>
+			<input type="submit" value="Upload">
+			<span id="uploadStatus"></span>
+		</form>
+	</section>
+
+	<section>
+		<div style="display:flex;justify-content:space-between;align-items:center;">
+			<h2>Episodes</h2>
+			<div>
+				<button type="button" id="refreshBtn">Refresh</button>
+			</div>
+		</div>
+		<div id="status"></div>
+		<table id="episodesTable" aria-live="polite">
+			<thead>
+				<tr>
+					<th>Title</th>
+					<th>File</th>
+					<th>Modified</th>
+					<th>Size</th>
+					<th>Actions</th>
+				</tr>
+			</thead>
+			<tbody>
+				<tr><td colspan="5">Loading…</td></tr>
+			</tbody>
+		</table>
+	</section>
+
+	<script>
+		const statusEl = document.getElementById('status');
+		const tableBody = document.querySelector('#episodesTable tbody');
+		const uploadForm = document.getElementById('uploadForm');
+		const uploadStatus = document.getElementById('uploadStatus');
+
+		function formatDate(value) {
+			if (!value) return '';
+			const date = new Date(value);
+			if (Number.isNaN(date.getTime())) return value;
+			return date.toLocaleString();
+		}
+
+		function formatSize(bytes) {
+			if (!Number.isFinite(bytes)) return '';
+			if (bytes < 1024) return bytes + ' B';
+			const units = ['KB','MB','GB'];
+			let size = bytes / 1024;
+			let unit = units[0];
+			for (let i=0; i<units.length && size >= 1024; i++) {
+				size /= 1024;
+				unit = units[i];
+			}
+			return size.toFixed(1) + ' ' + unit;
+		}
+
+		function encodePath(relPath) {
+			return relPath.split('/').map(encodeURIComponent).join('/');
+		}
+
+		async function loadEpisodes() {
+			statusEl.textContent = '';
+			try {
+				const res = await fetch('/episodes', { credentials: 'include' });
+				if (!res.ok) throw new Error('Request failed with ' + res.status);
+				const data = await res.json();
+				if (!Array.isArray(data)) throw new Error('Unexpected response');
+				renderEpisodes(data);
+			} catch (err) {
+				tableBody.innerHTML = '<tr><td colspan="5">Failed to load episodes.</td></tr>';
+				statusEl.textContent = err.message;
+				statusEl.className = 'error';
+			}
+		}
+
+		function renderEpisodes(items) {
+			if (items.length === 0) {
+				tableBody.innerHTML = '<tr><td colspan="5">No episodes found.</td></tr>';
+				return;
+			}
+
+			tableBody.innerHTML = '';
+			for (const item of items) {
+				const tr = document.createElement('tr');
+				const path = item.relative_path || item.RelativePath || '';
+				const linkPath = encodePath(path);
+				const href = '/audio/' + linkPath;
+
+				const titleCell = document.createElement('td');
+				titleCell.textContent = item.title || '';
+				tr.appendChild(titleCell);
+
+				const fileCell = document.createElement('td');
+				const link = document.createElement('a');
+				link.href = href;
+				link.target = '_blank';
+				link.rel = 'noopener';
+				link.textContent = item.filename || '';
+				fileCell.appendChild(link);
+				tr.appendChild(fileCell);
+
+				const modifiedCell = document.createElement('td');
+				modifiedCell.textContent = formatDate(item.modified_at || item.ModifiedAt);
+				tr.appendChild(modifiedCell);
+
+				const sizeCell = document.createElement('td');
+				sizeCell.textContent = formatSize(item.filesize_bytes || item.FilesizeBytes);
+				tr.appendChild(sizeCell);
+
+				const actionsCell = document.createElement('td');
+				actionsCell.className = 'actions';
+				const deleteButton = document.createElement('button');
+				deleteButton.type = 'button';
+				deleteButton.className = 'secondary';
+				deleteButton.dataset.path = linkPath;
+				deleteButton.textContent = 'Delete';
+				deleteButton.addEventListener('click', async () => {
+					const rel = deleteButton.dataset.path || '';
+					if (!confirm('Delete this episode from storage?')) return;
+					try {
+						const res = await fetch('/audio/' + rel, { method: 'DELETE', credentials: 'include' });
+						if (res.status !== 204) throw new Error('Delete failed with ' + res.status);
+						await loadEpisodes();
+						statusEl.textContent = 'Episode deleted';
+						statusEl.className = 'success';
+					} catch (err) {
+						statusEl.textContent = err.message;
+						statusEl.className = 'error';
+					}
+				});
+				actionsCell.appendChild(deleteButton);
+				tr.appendChild(actionsCell);
+
+				tableBody.appendChild(tr);
+			}
+		}
+
+		uploadForm.addEventListener('submit', async (event) => {
+			event.preventDefault();
+			const input = document.getElementById('fileInput');
+			if (!input.files || input.files.length === 0) {
+				uploadStatus.textContent = 'Select an audio file first.';
+				uploadStatus.className = 'error';
+				return;
+			}
+
+			const formData = new FormData();
+			formData.append('file', input.files[0]);
+
+			uploadStatus.textContent = 'Uploading…';
+			uploadStatus.className = '';
+
+			try {
+				const res = await fetch('/ui/upload', { method: 'POST', body: formData, credentials: 'include' });
+				if (!res.ok) throw new Error('Upload failed with ' + res.status);
+				uploadStatus.textContent = 'Upload complete';
+				uploadStatus.className = 'success';
+				input.value = '';
+				await loadEpisodes();
+			} catch (err) {
+				uploadStatus.textContent = err.message;
+				uploadStatus.className = 'error';
+			}
+		});
+
+		document.getElementById('refreshBtn').addEventListener('click', loadEpisodes);
+
+		loadEpisodes();
+	</script>
+</body>
+</html>`

@@ -35,7 +35,7 @@ func testFeedMetadata() FeedMetadata {
 
 func TestHealthEndpoint(t *testing.T) {
 	audioDir := t.TempDir()
-	handler := New(&fakeLibrary{}, nil, audioDir, testFeedMetadata(), log.New(io.Discard, "", 0))
+	handler := New(&fakeLibrary{}, nil, audioDir, nil, testFeedMetadata(), log.New(io.Discard, "", 0))
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rec := httptest.NewRecorder()
@@ -57,7 +57,7 @@ func TestHealthEndpoint(t *testing.T) {
 
 func TestHealthEndpointRejectsNonGET(t *testing.T) {
 	audioDir := t.TempDir()
-	handler := New(&fakeLibrary{}, nil, audioDir, testFeedMetadata(), log.New(io.Discard, "", 0))
+	handler := New(&fakeLibrary{}, nil, audioDir, nil, testFeedMetadata(), log.New(io.Discard, "", 0))
 
 	req := httptest.NewRequest(http.MethodPost, "/health", nil)
 	rec := httptest.NewRecorder()
@@ -81,7 +81,7 @@ func TestEpisodesEndpoint(t *testing.T) {
 		},
 	}
 	audioDir := t.TempDir()
-	handler := New(&fakeLibrary{episodes: episodes}, nil, audioDir, testFeedMetadata(), log.New(io.Discard, "", 0))
+	handler := New(&fakeLibrary{episodes: episodes}, nil, audioDir, nil, testFeedMetadata(), log.New(io.Discard, "", 0))
 
 	req := httptest.NewRequest(http.MethodGet, "/episodes", nil)
 	rec := httptest.NewRecorder()
@@ -104,7 +104,7 @@ func TestEpisodesEndpoint(t *testing.T) {
 
 func TestEpisodesEndpointRejectsNonGET(t *testing.T) {
 	audioDir := t.TempDir()
-	handler := New(&fakeLibrary{}, nil, audioDir, testFeedMetadata(), log.New(io.Discard, "", 0))
+	handler := New(&fakeLibrary{}, nil, audioDir, nil, testFeedMetadata(), log.New(io.Discard, "", 0))
 
 	req := httptest.NewRequest(http.MethodDelete, "/episodes", nil)
 	rec := httptest.NewRecorder()
@@ -128,7 +128,7 @@ func (f *fakeValidator) IsValidToken(token string) bool {
 func TestEpisodesEndpointRequiresToken(t *testing.T) {
 	validator := &fakeValidator{allowed: map[string]struct{}{"secret": {}}}
 	audioDir := t.TempDir()
-	handler := New(&fakeLibrary{}, validator, audioDir, testFeedMetadata(), log.New(io.Discard, "", 0))
+	handler := New(&fakeLibrary{}, validator, audioDir, nil, testFeedMetadata(), log.New(io.Discard, "", 0))
 
 	req := httptest.NewRequest(http.MethodGet, "/episodes", nil)
 	rec := httptest.NewRecorder()
@@ -170,7 +170,7 @@ func TestFeedEndpointProducesRSS(t *testing.T) {
 		},
 	}
 
-	handler := New(&fakeLibrary{episodes: episodes}, nil, audioDir, testFeedMetadata(), log.New(io.Discard, "", 0))
+	handler := New(&fakeLibrary{episodes: episodes}, nil, audioDir, nil, testFeedMetadata(), log.New(io.Discard, "", 0))
 
 	req := httptest.NewRequest(http.MethodGet, "/feed", nil)
 	req.Host = "feed.example"
@@ -233,7 +233,7 @@ func TestFeedEndpointRequiresToken(t *testing.T) {
 			ModifiedAt:    time.Unix(1700000000, 0).UTC(),
 		},
 	}
-	handler := New(&fakeLibrary{episodes: episodes}, validator, audioDir, testFeedMetadata(), log.New(io.Discard, "", 0))
+	handler := New(&fakeLibrary{episodes: episodes}, validator, audioDir, nil, testFeedMetadata(), log.New(io.Discard, "", 0))
 
 	req := httptest.NewRequest(http.MethodGet, "/feed", nil)
 	rec := httptest.NewRecorder()
@@ -288,7 +288,7 @@ func TestAudioEndpointServesFile(t *testing.T) {
 		t.Fatalf("write audio file: %v", err)
 	}
 
-	handler := New(&fakeLibrary{}, nil, audioDir, testFeedMetadata(), log.New(io.Discard, "", 0))
+	handler := New(&fakeLibrary{}, nil, audioDir, nil, testFeedMetadata(), log.New(io.Discard, "", 0))
 
 	req := httptest.NewRequest(http.MethodGet, "/audio/clip.mp3", nil)
 	rec := httptest.NewRecorder()
@@ -311,7 +311,7 @@ func TestAudioEndpointRequiresToken(t *testing.T) {
 	}
 
 	validator := &fakeValidator{allowed: map[string]struct{}{"secret": {}}}
-	handler := New(&fakeLibrary{}, validator, audioDir, testFeedMetadata(), log.New(io.Discard, "", 0))
+	handler := New(&fakeLibrary{}, validator, audioDir, nil, testFeedMetadata(), log.New(io.Discard, "", 0))
 
 	req := httptest.NewRequest(http.MethodGet, "/audio/clip.mp3", nil)
 	rec := httptest.NewRecorder()
