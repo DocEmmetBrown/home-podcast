@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Home Podcast is a Go 1.25 service that scans a directory of audio files and serves podcast metadata over HTTP, including an RSS 2.0 feed with iTunes extensions. It auto-refreshes when files change via fsnotify.
+Home Podcast is a Go 1.26 service that scans a directory of audio files and serves podcast metadata over HTTP, including an RSS 2.0 feed with iTunes extensions. It auto-refreshes when files change via fsnotify.
 
 ## Common Commands
 
@@ -48,8 +48,15 @@ Each internal package has `_test.go` files. Server tests parse XML to verify tok
 
 ## Adding Configuration
 
-When adding a new config variable: add a helper in `internal/config`, update the env var table in `README.md`, update `deploy/home-podcast.env.example`, and add tests.
+When adding a new config variable: add a helper in `internal/config`, update the env var table in `README.md`, update the Ansible env template in `ansible/roles/home-podcast/templates/home-podcast.env.j2`, add a default in `ansible/roles/home-podcast/defaults/main.yml`, and add tests.
 
 ## Deployment
 
-`make deploy DEPLOY_HOST=... DEPLOY_USER=...` uploads the binary and restarts the systemd service. `make first-deploy` handles initial provisioning (binary + service unit + env file + token file).
+Deployment uses Ansible. See `ansible/README.md` for full details.
+
+```bash
+ansible-playbook ansible/playbook.yml -i <host>,    # Build + deploy (trailing comma required)
+ansible-playbook ansible/playbook.yml -i <host>, --check --diff  # Dry run
+```
+
+The playbook cross-compiles the binary locally, then provisions the remote host (system user, directories, binary, systemd unit, env file, token file) and starts the service. Variables are in `ansible/roles/home-podcast/defaults/main.yml`.
