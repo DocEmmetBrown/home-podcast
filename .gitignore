@@ -5,7 +5,7 @@ __pycache__/
 .env
 .DS_Store
 bin/
-home-podcast
+/home-podcast
 home-podcast.exe
 token
 audio/*

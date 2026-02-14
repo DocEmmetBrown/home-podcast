@@ -1,0 +1,5 @@
+- name: Restart home-podcast
+  ansible.builtin.systemd:
+    name: home-podcast.service
+    state: restarted
+    daemon_reload: true

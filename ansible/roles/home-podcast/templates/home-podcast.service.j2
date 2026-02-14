@@ -1,0 +1,25 @@
+[Unit]
+Description=Home Podcast Metadata API
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ podcast_user }}
+Group={{ podcast_group }}
+EnvironmentFile={{ podcast_env_path }}
+WorkingDirectory={{ podcast_install_dir }}
+ExecStart={{ podcast_install_dir }}/home-podcast
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths={{ podcast_audio_dir }}
+RuntimeDirectory=home-podcast
+RuntimeDirectoryMode=0750
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,79 @@
+- name: Create service group
+  ansible.builtin.group:
+    name: "{{ podcast_group }}"
+    system: true
+
+- name: Create service user
+  ansible.builtin.user:
+    name: "{{ podcast_user }}"
+    group: "{{ podcast_group }}"
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+
+- name: Create install directory
+  ansible.builtin.file:
+    path: "{{ podcast_install_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create data directory
+  ansible.builtin.file:
+    path: "{{ podcast_data_dir }}"
+    state: directory
+    owner: "{{ podcast_user }}"
+    group: "{{ podcast_group }}"
+    mode: "0750"
+
+- name: Create audio directory
+  ansible.builtin.file:
+    path: "{{ podcast_audio_dir }}"
+    state: directory
+    owner: "{{ podcast_user }}"
+    group: "{{ podcast_group }}"
+    mode: "0750"
+
+- name: Upload binary
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../bin/home-podcast"
+    dest: "{{ podcast_install_dir }}/home-podcast"
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart home-podcast
+
+- name: Install systemd unit
+  ansible.builtin.template:
+    src: home-podcast.service.j2
+    dest: /etc/systemd/system/home-podcast.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart home-podcast
+
+- name: Install environment file
+  ansible.builtin.template:
+    src: home-podcast.env.j2
+    dest: "{{ podcast_env_path }}"
+    owner: root
+    group: "{{ podcast_group }}"
+    mode: "0640"
+  notify: Restart home-podcast
+
+- name: Create token file if absent
+  ansible.builtin.copy:
+    content: ""
+    dest: "{{ podcast_token_file }}"
+    owner: "{{ podcast_user }}"
+    group: "{{ podcast_group }}"
+    mode: "0600"
+    force: false
+
+- name: Enable and start service
+  ansible.builtin.systemd:
+    name: home-podcast.service
+    enabled: true
+    state: started
+    daemon_reload: true

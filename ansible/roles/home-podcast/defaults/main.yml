@@ -1,0 +1,14 @@
+podcast_user: home-podcast
+podcast_group: home-podcast
+podcast_install_dir: /opt/home-podcast
+podcast_data_dir: /srv/home-podcast
+podcast_audio_dir: /srv/home-podcast/audio
+podcast_listen_addr: "127.0.0.1:8080"
+podcast_refresh_debounce_ms: 500
+podcast_token_file: /srv/home-podcast/tokens.txt
+podcast_env_path: /etc/home-podcast.env
+podcast_feed_config: ""
+podcast_feed_title: ""
+podcast_feed_description: ""
+podcast_feed_language: ""
+podcast_feed_author: ""
