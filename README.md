@@ -4,11 +4,11 @@ This service is a Go binary that scans a directory of audio files and serves pod
 
 ## Features
 
-- **Go 1.25+ compiled binary** suitable for Linux/amd64 deployment.
+- **Go 1.26+ compiled binary** suitable for Linux/amd64 deployment.
 - **Directory watching** backed by `fsnotify`, with debounce handling to fold bursts of file events into single rescan operations.
 - **Tag extraction** via `github.com/dhowden/tag` (title/artist/album) and MP3 duration estimation using `github.com/tcolgate/mp3`.
 - **Local-only listener** (defaults to `127.0.0.1:8080`) for use behind a reverse proxy.
-- **Systemd unit file** and environment template under `deploy/` for Ubuntu hosts.
+- **Ansible-based deployment** with roles, templates, and handlers under `ansible/`.
 - **Podcast-compatible RSS feed** with iTunes extensions plus signed enclosure URLs for private distribution.
 
 ## Configuration
@@ -42,7 +42,7 @@ To manage feed metadata in one place, set `PODCAST_FEED_CONFIG` to a YAML file c
 
 Supported audio extensions are: `.mp3`, `.m4a`, `.aac`, `.wav`, `.flac`, `.ogg`.
 
-1. Install Go 1.25 or newer.
+1. Install Go 1.26 or newer.
 2. Fetch dependencies and build the binary (or run `make build-local`):
 
    ```bash
@@ -78,49 +78,19 @@ The provided `Makefile` streamlines common workflows:
 - `make build-local` — builds a binary for the current platform.
 - `make test` — runs the full test suite with coverage collection.
 - `make coverage` — shows the coverage summary after `make test`.
-- `make deploy` — uploads only the rebuilt binary and restarts the remote `home-podcast` systemd service.
-- `make first-deploy` — performs the full initial remote setup (binary, systemd unit, env file, optional token file) and enables the service; re-run this when provisioning a new host.
 
-Example deploy invocation:
+## Deployment
+
+Deployment is managed via Ansible. The `ansible/` directory contains a playbook and role that handle building, provisioning, and service management. See [ansible/README.md](ansible/README.md) for full usage instructions.
+
+Quick deploy example:
 
 ```bash
-make deploy DEPLOY_HOST=podcast.example.com DEPLOY_USER=ubuntu
+cd ansible
+ansible-playbook playbook.yml -i podcast.example.com,
 ```
 
-## Deployment on Ubuntu (systemd)
-
-The `deploy/` folder contains ready-to-customise artifacts:
-
-- `deploy/home-podcast.service` — systemd unit file.
-- `deploy/home-podcast.env.example` — environment variable template.
-
-Typical deployment steps (run as root or via sudo):
-
-1. Build the Linux/amd64 binary on the build machine:
-
-   ```bash
-   GOOS=linux GOARCH=amd64 go build -o home-podcast ./cmd/home-podcast
-   ```
-
-2. Copy the binary to the server, e.g. `/opt/home-podcast/home-podcast`, and ensure it is executable.
-3. Create a dedicated service user (`home-podcast`) and audio directory (for example `/srv/home-podcast/audio`).
-4. Copy `deploy/home-podcast.env.example` to `/etc/home-podcast.env` and adjust values (especially `PODCAST_AUDIO_DIR` and `PODCAST_LISTEN_ADDR`).
-5. Copy `deploy/home-podcast.service` to `/etc/systemd/system/home-podcast.service` and tweak paths/users as required.
-6. Reload systemd and start the service:
-
-   ```bash
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now home-podcast.service
-   ```
-
-7. Check status and logs:
-
-   ```bash
-   systemctl status home-podcast.service
-   journalctl -u home-podcast.service -f
-   ```
-
-The unit binds to localhost, making it safe to expose through an nginx, Caddy, or Apache reverse proxy on the same host.
+The Ansible role handles: system user/group creation, directory setup, binary upload, systemd unit and env file templating, token file creation, and service enable/start. The unit binds to localhost, making it safe to expose through an nginx, Caddy, or Apache reverse proxy on the same host.
 
 ## Development Notes
 

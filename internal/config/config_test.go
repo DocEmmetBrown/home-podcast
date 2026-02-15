@@ -218,6 +218,105 @@ func TestResolveFeedMetadataFromFile(t *testing.T) {
 	}
 }
 
+func TestResolveTokenFileExistingFileNotOverwritten(t *testing.T) {
+	temp := t.TempDir()
+	tokenFile := filepath.Join(temp, "tokens.txt")
+	if err := os.WriteFile(tokenFile, []byte("existing-token\n"), 0o644); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+
+	t.Setenv("PODCAST_TOKEN_FILE", tokenFile)
+
+	path, ok, err := ResolveTokenFile()
+	if err != nil {
+		t.Fatalf("ResolveTokenFile: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected ok flag")
+	}
+	assertSamePath(t, path, tokenFile)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read token file: %v", err)
+	}
+	if string(data) != "existing-token\n" {
+		t.Fatalf("expected existing content to be preserved, got %q", data)
+	}
+}
+
+func TestResolveTokenFileTildeExpansion(t *testing.T) {
+	temp := t.TempDir()
+	fakeHome := filepath.Join(temp, "fakehome")
+	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("PODCAST_TOKEN_FILE", "~/tokens.txt")
+
+	path, ok, err := ResolveTokenFile()
+	if err != nil {
+		t.Fatalf("ResolveTokenFile: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected ok flag")
+	}
+
+	expected := filepath.Join(fakeHome, "tokens.txt")
+	assertSamePath(t, path, expected)
+}
+
+func TestResolveTokenFileCreatesParentDir(t *testing.T) {
+	temp := t.TempDir()
+	tokenFile := filepath.Join(temp, "deep", "nested", "tokens.txt")
+	t.Setenv("PODCAST_TOKEN_FILE", tokenFile)
+
+	path, ok, err := ResolveTokenFile()
+	if err != nil {
+		t.Fatalf("ResolveTokenFile: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected ok flag")
+	}
+	assertSamePath(t, path, tokenFile)
+
+	info, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("parent dir should exist: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("expected parent to be a directory")
+	}
+}
+
+func TestResolveConfigPath(t *testing.T) {
+	temp := t.TempDir()
+	fakeHome := filepath.Join(temp, "fakehome")
+	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	t.Setenv("HOME", fakeHome)
+
+	resolved, err := resolveConfigPath("~/config.yaml")
+	if err != nil {
+		t.Fatalf("resolveConfigPath tilde: %v", err)
+	}
+	expected := filepath.Join(fakeHome, "config.yaml")
+	if resolved != expected {
+		t.Fatalf("expected %s, got %s", expected, resolved)
+	}
+
+	absPath := filepath.Join(temp, "absolute.yaml")
+	resolved, err = resolveConfigPath(absPath)
+	if err != nil {
+		t.Fatalf("resolveConfigPath abs: %v", err)
+	}
+	if resolved != absPath {
+		t.Fatalf("expected %s, got %s", absPath, resolved)
+	}
+}
+
 func assertSamePath(t *testing.T, got, want string) {
 	t.Helper()
 	resolvedGot, err := filepath.EvalSymlinks(got)

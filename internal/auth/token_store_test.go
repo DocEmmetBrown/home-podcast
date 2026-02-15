@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -85,4 +86,79 @@ func waitForToken(t *testing.T, store *TokenStore, token string, want bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timeout waiting for token %s to reach state %v", token, want)
+}
+
+func TestTokenStoreSiblingFileIgnored(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "tokens.txt")
+	writeTokenFile(t, file, "alpha\n")
+
+	store, err := NewTokenStore(file, 5*time.Millisecond, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("NewTokenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if !store.IsValidToken("alpha") {
+		t.Fatalf("expected alpha to be valid")
+	}
+
+	sibling := filepath.Join(dir, "other.txt")
+	if err := os.WriteFile(sibling, []byte("noise"), 0o644); err != nil {
+		t.Fatalf("write sibling: %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	if !store.IsValidToken("alpha") {
+		t.Fatalf("expected alpha to remain valid after sibling write")
+	}
+}
+
+func TestTokenStoreEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "tokens.txt")
+	writeTokenFile(t, file, "")
+
+	store, err := NewTokenStore(file, 5*time.Millisecond, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("NewTokenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if store.IsValidToken("anything") {
+		t.Fatalf("expected no valid tokens from empty file")
+	}
+}
+
+func TestTokenStoreConcurrentValidation(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "tokens.txt")
+	writeTokenFile(t, file, "alpha\nbeta\n")
+
+	store, err := NewTokenStore(file, 5*time.Millisecond, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("NewTokenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				store.IsValidToken("alpha")
+				store.IsValidToken("beta")
+				store.IsValidToken("invalid")
+			}
+		}()
+	}
+
+	// Trigger refreshes while validating concurrently.
+	writeTokenFile(t, file, "alpha\nbeta\ngamma\n")
+	time.Sleep(50 * time.Millisecond)
+	writeTokenFile(t, file, "alpha\n")
+
+	wg.Wait()
 }

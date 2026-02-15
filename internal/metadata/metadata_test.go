@@ -103,3 +103,71 @@ func TestComputeMP3DurationErrors(t *testing.T) {
 		t.Fatalf("expected zero duration on error, got %f", duration)
 	}
 }
+
+func TestBuildEpisodeNonexistentFile(t *testing.T) {
+	root := t.TempDir()
+	_, err := BuildEpisode(filepath.Join(root, "missing.wav"), root)
+	if err == nil {
+		t.Fatalf("expected error for nonexistent file")
+	}
+}
+
+func TestBuildEpisodeNonMP3HasNoDuration(t *testing.T) {
+	root := t.TempDir()
+	for _, ext := range []string{".m4a", ".aac", ".flac", ".ogg"} {
+		path := filepath.Join(root, "track"+ext)
+		if err := os.WriteFile(path, []byte("audio data"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", ext, err)
+		}
+
+		ep, err := BuildEpisode(path, root)
+		if err != nil {
+			t.Fatalf("BuildEpisode(%s): %v", ext, err)
+		}
+		if ep.DurationSeconds != nil {
+			t.Fatalf("expected nil duration for %s", ext)
+		}
+		if ep.BitrateKbps != nil {
+			t.Fatalf("expected nil bitrate for %s", ext)
+		}
+	}
+}
+
+func TestBuildEpisodeFilenameFallbackTitle(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "My Great Episode.flac")
+	if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	ep, err := BuildEpisode(path, root)
+	if err != nil {
+		t.Fatalf("BuildEpisode: %v", err)
+	}
+	if ep.Title != "My Great Episode" {
+		t.Fatalf("expected title 'My Great Episode', got %q", ep.Title)
+	}
+}
+
+func TestBuildEpisodeFilesizeAndFilename(t *testing.T) {
+	root := t.TempDir()
+	content := []byte("some audio content here")
+	path := filepath.Join(root, "clip.wav")
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	ep, err := BuildEpisode(path, root)
+	if err != nil {
+		t.Fatalf("BuildEpisode: %v", err)
+	}
+	if ep.FilesizeBytes != int64(len(content)) {
+		t.Fatalf("expected filesize %d, got %d", len(content), ep.FilesizeBytes)
+	}
+	if ep.Filename != "clip.wav" {
+		t.Fatalf("expected filename 'clip.wav', got %q", ep.Filename)
+	}
+	if ep.RelativePath != "clip.wav" {
+		t.Fatalf("expected relative path 'clip.wav', got %q", ep.RelativePath)
+	}
+}

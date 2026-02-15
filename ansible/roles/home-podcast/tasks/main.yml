@@ -71,6 +71,13 @@
     mode: "0600"
     force: false
 
+- name: Ensure token file ownership and permissions
+  ansible.builtin.file:
+    path: "{{ podcast_token_file }}"
+    owner: "{{ podcast_user }}"
+    group: "{{ podcast_group }}"
+    mode: "0600"
+
 - name: Enable and start service
   ansible.builtin.systemd:
     name: home-podcast.service

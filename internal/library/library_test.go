@@ -75,6 +75,110 @@ func TestLibraryWatchesAndRefreshes(t *testing.T) {
 	}
 }
 
+func TestLibraryIgnoresNonAudioFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("text"), 0o644); err != nil {
+		t.Fatalf("write txt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "song.wav"), []byte("audio"), 0o644); err != nil {
+		t.Fatalf("write wav: %v", err)
+	}
+
+	logger := log.New(io.Discard, "", 0)
+	lib, err := NewLibrary(root, []string{".wav"}, 10*time.Millisecond, logger)
+	if err != nil {
+		t.Fatalf("NewLibrary: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+
+	waitFor(t, func() bool { return len(lib.ListEpisodes()) == 1 }, "initial scan")
+
+	eps := lib.ListEpisodes()
+	if eps[0].Filename != "song.wav" {
+		t.Fatalf("expected song.wav, got %s", eps[0].Filename)
+	}
+
+	// Adding another non-audio file should not change the count.
+	if err := os.WriteFile(filepath.Join(root, "readme.md"), []byte("doc"), 0o644); err != nil {
+		t.Fatalf("write md: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	if len(lib.ListEpisodes()) != 1 {
+		t.Fatalf("expected still 1 episode, got %d", len(lib.ListEpisodes()))
+	}
+}
+
+func TestLibraryMultipleExtensions(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.mp3"), []byte("mp3"), 0o644); err != nil {
+		t.Fatalf("write mp3: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "b.flac"), []byte("flac"), 0o644); err != nil {
+		t.Fatalf("write flac: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "c.txt"), []byte("text"), 0o644); err != nil {
+		t.Fatalf("write txt: %v", err)
+	}
+
+	logger := log.New(io.Discard, "", 0)
+	lib, err := NewLibrary(root, []string{".mp3", ".flac"}, 10*time.Millisecond, logger)
+	if err != nil {
+		t.Fatalf("NewLibrary: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+
+	waitFor(t, func() bool { return len(lib.ListEpisodes()) == 2 }, "scan mp3 and flac")
+}
+
+func TestLibraryEmptyDirectory(t *testing.T) {
+	root := t.TempDir()
+
+	logger := log.New(io.Discard, "", 0)
+	lib, err := NewLibrary(root, []string{".wav"}, 10*time.Millisecond, logger)
+	if err != nil {
+		t.Fatalf("NewLibrary: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+
+	time.Sleep(50 * time.Millisecond)
+
+	if len(lib.ListEpisodes()) != 0 {
+		t.Fatalf("expected 0 episodes for empty dir, got %d", len(lib.ListEpisodes()))
+	}
+
+	// Adding a file to an initially empty library should be detected.
+	if err := os.WriteFile(filepath.Join(root, "new.wav"), []byte("audio"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	waitFor(t, func() bool { return len(lib.ListEpisodes()) == 1 }, "detect new file")
+}
+
+func TestLibraryPreexistingSubdirectory(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "albums", "jazz")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "track.wav"), []byte("jazz"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	logger := log.New(io.Discard, "", 0)
+	lib, err := NewLibrary(root, []string{".wav"}, 10*time.Millisecond, logger)
+	if err != nil {
+		t.Fatalf("NewLibrary: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+
+	waitFor(t, func() bool { return len(lib.ListEpisodes()) == 1 }, "scan pre-existing nested file")
+
+	eps := lib.ListEpisodes()
+	if eps[0].Filename != "track.wav" {
+		t.Fatalf("expected track.wav, got %s", eps[0].Filename)
+	}
+}
+
 func waitFor(t *testing.T, predicate func() bool, label string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
