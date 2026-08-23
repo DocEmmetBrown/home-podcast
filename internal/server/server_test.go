@@ -223,6 +223,49 @@ func TestFeedEndpointProducesRSS(t *testing.T) {
 	}
 }
 
+func TestFeedKeepsFolderChaptersInOrder(t *testing.T) {
+	audioDir := t.TempDir()
+	base := time.Unix(1700000000, 0).UTC()
+	episodes := []models.Episode{
+		{ID: "book/chapter 10.mp3", Filename: "chapter 10.mp3", RelativePath: "book/chapter 10.mp3", Title: "Chapter 10", ModifiedAt: base.Add(10 * time.Minute)},
+		{ID: "book/chapter 2.mp3", Filename: "chapter 2.mp3", RelativePath: "book/chapter 2.mp3", Title: "Chapter 2", ModifiedAt: base.Add(2 * time.Minute)},
+		{ID: "book/chapter 1.mp3", Filename: "chapter 1.mp3", RelativePath: "book/chapter 1.mp3", Title: "Chapter 1", ModifiedAt: base.Add(time.Minute)},
+		{ID: "standalone.mp3", Filename: "standalone.mp3", RelativePath: "standalone.mp3", Title: "Standalone", ModifiedAt: base},
+	}
+
+	handler := New(&fakeLibrary{episodes: episodes}, nil, audioDir, nil, testFeedMetadata(), log.New(io.Discard, "", 0))
+
+	req := httptest.NewRequest(http.MethodGet, "/feed", nil)
+	req.Host = "feed.example"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var payload struct {
+		Channel struct {
+			Items []struct {
+				Title string `xml:"title"`
+			} `xml:"item"`
+		} `xml:"channel"`
+	}
+	if err := xml.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal rss: %v", err)
+	}
+
+	want := []string{"Chapter 1", "Chapter 2", "Chapter 10", "Standalone"}
+	if len(payload.Channel.Items) != len(want) {
+		t.Fatalf("expected %d items, got %d", len(want), len(payload.Channel.Items))
+	}
+	for i := range want {
+		if payload.Channel.Items[i].Title != want[i] {
+			t.Fatalf("item %d = %s, want %s", i, payload.Channel.Items[i].Title, want[i])
+		}
+	}
+}
+
 func TestFeedEndpointRequiresToken(t *testing.T) {
 	validator := &fakeValidator{allowed: map[string]struct{}{"secret": {}}}
 	audioDir := t.TempDir()

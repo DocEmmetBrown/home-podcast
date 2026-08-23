@@ -1,6 +1,7 @@
 package library
 
 import (
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -13,6 +14,14 @@ import (
 
 	"home-podcast/internal/metadata"
 	"home-podcast/internal/models"
+	"home-podcast/internal/naturalorder"
+)
+
+// Newly parsed episodes become visible to clients as soon as one of these
+// thresholds is reached, so a large import never hides the existing library.
+const (
+	publishBatchSize = 8
+	publishInterval  = 2 * time.Second
 )
 
 // Library monitors an audio directory and keeps in-memory metadata for clients.
@@ -23,16 +32,26 @@ type Library struct {
 	logger  *log.Logger
 
 	mu       sync.RWMutex
+	index    map[string]models.Episode
 	episodes []models.Episode
 
 	refreshMu    sync.Mutex
 	refreshTimer *time.Timer
 	refreshDelay time.Duration
 
+	scanRequests chan struct{}
+
 	done      chan struct{}
 	wg        sync.WaitGroup
 	closeOnce sync.Once
 	closeErr  error
+}
+
+type fileRef struct {
+	path     string
+	relative string
+	size     int64
+	modTime  time.Time
 }
 
 // NewLibrary creates a new Library and starts watching the provided root path.
@@ -51,7 +70,9 @@ func NewLibrary(root string, allowed []string, debounce time.Duration, logger *l
 		allowed:      make(map[string]struct{}, len(allowed)),
 		watcher:      watcher,
 		logger:       logger,
+		index:        make(map[string]models.Episode),
 		refreshDelay: debounce,
+		scanRequests: make(chan struct{}, 1),
 		done:         make(chan struct{}),
 	}
 
@@ -61,13 +82,13 @@ func NewLibrary(root string, allowed []string, debounce time.Duration, logger *l
 
 	lib.addWatchRecursive(root)
 
-	if err := lib.refresh(); err != nil {
-		watcher.Close()
-		return nil, err
-	}
-
-	lib.wg.Add(1)
+	lib.wg.Add(2)
 	go lib.run()
+	go lib.scanLoop()
+
+	// The first scan runs in the background so the HTTP server can start serving
+	// immediately, even with a large or slow library.
+	lib.requestScan()
 
 	return lib, nil
 }
@@ -121,6 +142,21 @@ func (l *Library) run() {
 	}
 }
 
+// scanLoop serialises scans so bursts of file events cannot stack up concurrent
+// metadata parses.
+func (l *Library) scanLoop() {
+	defer l.wg.Done()
+
+	for {
+		select {
+		case <-l.done:
+			return
+		case <-l.scanRequests:
+			l.refresh()
+		}
+	}
+}
+
 func (l *Library) handleEvent(event fsnotify.Event) {
 	if event.Op&fsnotify.Create == fsnotify.Create {
 		if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
@@ -135,56 +171,169 @@ func (l *Library) handleEvent(event fsnotify.Event) {
 	}
 }
 
-func (l *Library) refresh() error {
-	var episodes []models.Episode
+// refresh walks the library and only parses files that are new or changed,
+// publishing intermediate results so clients keep seeing the known episodes
+// while a large import is still being processed.
+func (l *Library) refresh() {
+	files := l.collectFiles()
 
-	err := filepath.WalkDir(l.root, func(path string, d os.DirEntry, err error) error {
+	seen := make(map[string]struct{}, len(files))
+	pending := 0
+	parsed := 0
+	lastPublish := time.Now()
+
+	for _, f := range files {
+		if l.closed() {
+			return
+		}
+
+		seen[f.relative] = struct{}{}
+		if l.isCurrent(f) {
+			continue
+		}
+
+		episode, err := metadata.BuildEpisode(f.path, l.root)
+		if err != nil {
+			l.logger.Printf("metadata error for %s: %v", f.path, err)
+			continue
+		}
+
+		l.store(episode)
+		pending++
+		parsed++
+
+		if pending >= publishBatchSize || time.Since(lastPublish) >= publishInterval {
+			l.publish()
+			pending = 0
+			lastPublish = time.Now()
+		}
+	}
+
+	removed := l.prune(seen)
+	if pending > 0 || removed > 0 {
+		l.publish()
+	}
+
+	if parsed > 0 || removed > 0 {
+		l.logger.Printf("library updated: %d parsed, %d removed, %d episodes total", parsed, removed, l.count())
+	}
+}
+
+func (l *Library) collectFiles() []fileRef {
+	var files []fileRef
+
+	err := filepath.WalkDir(l.root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			l.logger.Printf("walk error for %s: %v", path, err)
 			return nil
 		}
 
-		if d.IsDir() {
+		if d.IsDir() || !l.isAllowed(path) {
 			return nil
 		}
 
-		if !l.isAllowed(path) {
-			return nil
-		}
-
-		episode, err := metadata.BuildEpisode(path, l.root)
+		info, err := d.Info()
 		if err != nil {
-			l.logger.Printf("metadata error for %s: %v", path, err)
+			l.logger.Printf("stat error for %s: %v", path, err)
 			return nil
 		}
 
-		episodes = append(episodes, episode)
+		relative, err := filepath.Rel(l.root, path)
+		if err != nil {
+			relative = filepath.Base(path)
+		}
+
+		files = append(files, fileRef{
+			path:     path,
+			relative: filepath.ToSlash(relative),
+			size:     info.Size(),
+			modTime:  info.ModTime().UTC().Round(time.Second),
+		})
 		return nil
 	})
 	if err != nil {
-		return err
+		l.logger.Printf("library walk error: %v", err)
+	}
+
+	return files
+}
+
+// isCurrent reports whether cached metadata still matches the file on disk.
+func (l *Library) isCurrent(f fileRef) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	episode, ok := l.index[f.relative]
+	return ok && episode.FilesizeBytes == f.size && episode.ModifiedAt.Equal(f.modTime)
+}
+
+func (l *Library) store(episode models.Episode) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.index[episode.RelativePath] = episode
+}
+
+func (l *Library) prune(seen map[string]struct{}) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	removed := 0
+	for relative := range l.index {
+		if _, ok := seen[relative]; !ok {
+			delete(l.index, relative)
+			removed++
+		}
+	}
+	return removed
+}
+
+func (l *Library) publish() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	episodes := make([]models.Episode, 0, len(l.index))
+	for _, episode := range l.index {
+		episodes = append(episodes, episode)
 	}
 
 	sort.SliceStable(episodes, func(i, j int) bool {
-		if episodes[i].RelativePath == episodes[j].RelativePath {
-			return episodes[i].Filename < episodes[j].Filename
-		}
-		return episodes[i].RelativePath < episodes[j].RelativePath
+		return naturalorder.Less(episodes[i].RelativePath, episodes[j].RelativePath)
 	})
 
-	l.mu.Lock()
 	l.episodes = episodes
-	l.mu.Unlock()
+}
 
-	l.logger.Printf("library refreshed with %d episodes", len(episodes))
-	return nil
+func (l *Library) count() int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return len(l.episodes)
+}
+
+func (l *Library) closed() bool {
+	select {
+	case <-l.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func (l *Library) requestScan() {
+	if l.closed() {
+		return
+	}
+
+	select {
+	case l.scanRequests <- struct{}{}:
+	default:
+		// A scan is already queued and will pick up the latest state.
+	}
 }
 
 func (l *Library) scheduleRefresh() {
-	select {
-	case <-l.done:
+	if l.closed() {
 		return
-	default:
 	}
 
 	l.refreshMu.Lock()
@@ -196,9 +345,7 @@ func (l *Library) scheduleRefresh() {
 
 	var timer *time.Timer
 	timer = time.AfterFunc(l.refreshDelay, func() {
-		if err := l.refresh(); err != nil {
-			l.logger.Printf("refresh error: %v", err)
-		}
+		l.requestScan()
 
 		l.refreshMu.Lock()
 		if l.refreshTimer == timer {
@@ -211,7 +358,7 @@ func (l *Library) scheduleRefresh() {
 }
 
 func (l *Library) addWatchRecursive(path string) {
-	filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
+	filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			l.logger.Printf("walk error for %s: %v", p, err)
 			return nil

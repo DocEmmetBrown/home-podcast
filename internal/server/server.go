@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"home-podcast/internal/models"
+	"home-podcast/internal/naturalorder"
 )
 
 // EpisodeProvider abstracts the episode source for the HTTP handlers.
@@ -336,6 +337,37 @@ func (h *serverHandler) requestBaseURL(r *http.Request) *url.URL {
 	return &url.URL{Scheme: scheme, Host: host}
 }
 
+// sortFeedEpisodes orders the feed newest-first, but keeps every folder's files
+// together in natural order so book chapters stay in sequence.
+func sortFeedEpisodes(episodes []models.Episode) {
+	newestPerDir := make(map[string]time.Time, len(episodes))
+	for _, ep := range episodes {
+		dir := pathpkg.Dir(ep.RelativePath)
+		if current, ok := newestPerDir[dir]; !ok || ep.ModifiedAt.After(current) {
+			newestPerDir[dir] = ep.ModifiedAt
+		}
+	}
+
+	sort.SliceStable(episodes, func(i, j int) bool {
+		iDir := pathpkg.Dir(episodes[i].RelativePath)
+		jDir := pathpkg.Dir(episodes[j].RelativePath)
+
+		if iDir != jDir {
+			if !newestPerDir[iDir].Equal(newestPerDir[jDir]) {
+				return newestPerDir[iDir].After(newestPerDir[jDir])
+			}
+			return naturalorder.Less(iDir, jDir)
+		}
+
+		// Loose files at the root behave like standalone episodes.
+		if iDir == "." && !episodes[i].ModifiedAt.Equal(episodes[j].ModifiedAt) {
+			return episodes[i].ModifiedAt.After(episodes[j].ModifiedAt)
+		}
+
+		return naturalorder.Less(episodes[i].RelativePath, episodes[j].RelativePath)
+	})
+}
+
 func (h *serverHandler) buildRSSFeed(base *url.URL, requestPath, rawQuery string, episodes []models.Episode, token string) ([]byte, error) {
 	feedURL := *base
 	feedURL.Path = requestPath
@@ -347,14 +379,7 @@ func (h *serverHandler) buildRSSFeed(base *url.URL, requestPath, rawQuery string
 
 	sorted := make([]models.Episode, len(episodes))
 	copy(sorted, episodes)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		iTime := sorted[i].ModifiedAt
-		jTime := sorted[j].ModifiedAt
-		if iTime.Equal(jTime) {
-			return sorted[i].ID > sorted[j].ID
-		}
-		return iTime.After(jTime)
-	})
+	sortFeedEpisodes(sorted)
 
 	lastBuild := time.Time{}
 	for _, ep := range sorted {

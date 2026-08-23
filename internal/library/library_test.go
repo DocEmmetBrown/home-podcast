@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -177,6 +178,84 @@ func TestLibraryPreexistingSubdirectory(t *testing.T) {
 	if eps[0].Filename != "track.wav" {
 		t.Fatalf("expected track.wav, got %s", eps[0].Filename)
 	}
+}
+
+func TestLibraryOrdersChaptersNaturally(t *testing.T) {
+	root := t.TempDir()
+	book := filepath.Join(root, "book")
+	if err := os.MkdirAll(book, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	names := []string{"chapter 10.wav", "chapter 2.wav", "chapter 1.wav", "chapter 20.wav"}
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(book, name), []byte(name), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	logger := log.New(io.Discard, "", 0)
+	lib, err := NewLibrary(root, []string{".wav"}, 10*time.Millisecond, logger)
+	if err != nil {
+		t.Fatalf("NewLibrary: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+
+	waitFor(t, func() bool { return len(lib.ListEpisodes()) == len(names) }, "scan chapters")
+
+	want := []string{"chapter 1.wav", "chapter 2.wav", "chapter 10.wav", "chapter 20.wav"}
+	eps := lib.ListEpisodes()
+	for i := range want {
+		if eps[i].Filename != want[i] {
+			t.Fatalf("episode %d = %s, want %s", i, eps[i].Filename, want[i])
+		}
+	}
+}
+
+func TestLibraryKeepsExistingEpisodesWhileImporting(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "known.wav"), []byte("known"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	logger := log.New(io.Discard, "", 0)
+	lib, err := NewLibrary(root, []string{".wav"}, 10*time.Millisecond, logger)
+	if err != nil {
+		t.Fatalf("NewLibrary: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+
+	waitFor(t, func() bool { return len(lib.ListEpisodes()) == 1 }, "initial scan")
+
+	const bulk = 40
+	for i := 0; i < bulk; i++ {
+		name := filepath.Join(root, "bulk-"+strconv.Itoa(i)+".wav")
+		if err := os.WriteFile(name, []byte(name), 0o644); err != nil {
+			t.Fatalf("write bulk file: %v", err)
+		}
+	}
+
+	// The known episode must stay served for the whole duration of the import.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		eps := lib.ListEpisodes()
+		found := false
+		for _, ep := range eps {
+			if ep.Filename == "known.wav" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("known episode disappeared during import (%d episodes served)", len(eps))
+		}
+		if len(eps) == bulk+1 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("timeout waiting for bulk import, got %d episodes", len(lib.ListEpisodes()))
 }
 
 func waitFor(t *testing.T, predicate func() bool, label string) {
